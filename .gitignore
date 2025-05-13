@@ -1,0 +1,30 @@
+cat > .gitignore << 'EOL'
+# Compiled class files
+*.class
+
+# Log files
+*.log
+invalid_pf_log.txt
+statistics_log.txt
+
+# Configuration files with sensitive data
+src/main/resources/application.properties
+
+# Build directories
+target/
+build/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+EOL
