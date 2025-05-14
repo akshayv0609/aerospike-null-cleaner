@@ -67,68 +67,75 @@ public class AerospikeCleaner {
         }
     }
     
-    public void clean() {
+    public CleanerResult cleanAndReturnResults() {
         long startTime = System.currentTimeMillis();
-
+        
         int totalRecords = 0;
         int updatedCount = 0;
 
         ClientPolicy clientPolicy = new ClientPolicy();
         clientPolicy.timeout = 2000;
-        AerospikeClient client = new AerospikeClient(clientPolicy, host, port);
-        WritePolicy policy = new WritePolicy();
-        policy.sendKey = true;
+        
+        try (AerospikeClient client = new AerospikeClient(clientPolicy, host, port)) {
+            Statement stmt = new Statement();
+            stmt.setNamespace(namespace);
+            stmt.setSetName(setName);
 
-        Statement stmt = new Statement();
-        stmt.setNamespace(namespace);
-        stmt.setSetName(setName);
+            RecordSet recordSet = client.query(null, stmt);
+            List<RecordWithKey> batch = new ArrayList<>();
 
-        RecordSet recordSet = client.query(null, stmt);
-        List<RecordWithKey> batch = new ArrayList<>();
+            try (BufferedWriter logWriter = new BufferedWriter(new FileWriter("invalid_pf_log.txt", true))) {
+                while (recordSet.next()) {
+                    batch.add(new RecordWithKey(recordSet.getKey(), recordSet.getRecord()));
 
-        try (BufferedWriter logWriter = new BufferedWriter(new FileWriter("invalid_pf_log.txt", true))) {
-            while (recordSet.next()) {
-                batch.add(new RecordWithKey(recordSet.getKey(), recordSet.getRecord()));
-
-                if (batch.size() >= MAX_BATCH_RECORDS) {
-                    updatedCount += processBatch(batch, client, policy, logWriter);
-                    totalRecords += batch.size();
-                    batch.clear();
+                    if (batch.size() >= MAX_BATCH_RECORDS) {
+                        updatedCount += processBatch(batch, client, new WritePolicy(), logWriter);
+                        totalRecords += batch.size();
+                        batch.clear();
+                    }
                 }
-            }
 
-            if (!batch.isEmpty()) {
-                updatedCount += processBatch(batch, client, policy, logWriter);
-                totalRecords += batch.size();
-            }
+                if (!batch.isEmpty()) {
+                    updatedCount += processBatch(batch, client, new WritePolicy(), logWriter);
+                    totalRecords += batch.size();
+                }
 
-            try (BufferedWriter statsWriter = new BufferedWriter(new FileWriter("statistics_log.txt", true))) {
-                statsWriter.write("Total records processed: " + totalRecords + "\n");
-                statsWriter.write("Records with both 'he' AND 'hm' null: " + bothNullCount + "\n");
-                statsWriter.write("Records with only 'he' null: " + onlyHeNullCount + "\n");
-                statsWriter.write("Records with only 'hm' null: " + onlyHmNullCount + "\n");
-                statsWriter.write("Records with either 'he' OR 'hm' null: " + recordsWithEitherNull + "\n");
-                statsWriter.write("Records updated: " + updatedCount + "\n");
-                statsWriter.write("oid entries removed with type='hm' and null id: " + nullHmOidCount + "\n");
-                statsWriter.write("oid entries removed with type='he' and null id: " + nullHeOidCount + "\n");
+                try (BufferedWriter statsWriter = new BufferedWriter(new FileWriter("statistics_log.txt", true))) {
+                    statsWriter.write("Total records processed: " + totalRecords + "\n");
+                    statsWriter.write("Records with both 'he' AND 'hm' null: " + bothNullCount + "\n");
+                    statsWriter.write("Records with only 'he' null: " + onlyHeNullCount + "\n");
+                    statsWriter.write("Records with only 'hm' null: " + onlyHmNullCount + "\n");
+                    statsWriter.write("Records with either 'he' OR 'hm' null: " + recordsWithEitherNull + "\n");
+                    statsWriter.write("Records updated: " + updatedCount + "\n");
+                    statsWriter.write("oid entries removed with type='hm' and null id: " + nullHmOidCount + "\n");
+                    statsWriter.write("oid entries removed with type='he' and null id: " + nullHeOidCount + "\n");
+                }
+            } catch (IOException e) {
+                System.err.println("Log writing error: " + e.getMessage());
+            } finally {
+                recordSet.close();
             }
-        } catch (IOException e) {
-            System.err.println("Log writing error: " + e.getMessage());
-        } finally {
-            recordSet.close();
-            client.close();
-            long endTime = System.currentTimeMillis();
-            System.out.println("\nAerospike Cleaner Statistics:");
-            System.out.println("Total records processed: " + totalRecords);
-            System.out.println("Records with both 'he' AND 'hm' null: " + bothNullCount);
-            System.out.println("Records with only 'he' null: " + onlyHeNullCount);
-            System.out.println("Records with only 'hm' null: " + onlyHmNullCount);
-            System.out.println("Records with either 'he' OR 'hm' null: " + recordsWithEitherNull);
-            System.out.println("Records updated: " + updatedCount);
-            System.out.println("oid entries removed with type='hm' and null id: " + nullHmOidCount);
-            System.out.println("oid entries removed with type='he' and null id: " + nullHeOidCount);
-            System.out.println("[Aerospike] Time taken: " + (endTime - startTime) + " ms");
         }
+        
+        long executionTime = System.currentTimeMillis() - startTime;
+        
+        return new CleanerResult(
+            "Aerospike", 
+            totalRecords, 
+            bothNullCount, 
+            onlyHeNullCount, 
+            onlyHmNullCount, 
+            recordsWithEitherNull, 
+            updatedCount, 
+            nullHeOidCount, 
+            nullHmOidCount, 
+            executionTime
+        );
+    }
+    
+    public void clean() {
+        CleanerResult result = cleanAndReturnResults();
+        result.printToConsole();
     }
 
     private int processBatch(List<RecordWithKey> batch, AerospikeClient client, WritePolicy policy, BufferedWriter logWriter) {
@@ -226,7 +233,6 @@ public class AerospikeCleaner {
                 if (modified) {
                     client.put(policy, key, new Bin("pf", pfJson.toString()));
                     updated++;
-                    System.out.println("Updated: " + key.userKey);
                 }
             } catch (Exception e) {
                 System.err.println("Error for key: " + key.userKey + " - " + e.getMessage());
@@ -252,4 +258,4 @@ public class AerospikeCleaner {
             this.record = record;
         }
     }
-} 
+}

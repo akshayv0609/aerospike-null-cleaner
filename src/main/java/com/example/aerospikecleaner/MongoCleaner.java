@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
 
+
 public class MongoCleaner {
 
     private static final int MAX_BATCH_SIZE = 500;
@@ -26,39 +27,38 @@ public class MongoCleaner {
     private int updatedCount = 0;
 
     public MongoCleaner() {
-    Properties properties = new Properties();
-    String uri = null;
-    String dbName = null;
-    String collectionName = null;
-    
-    try (InputStream input = getClass().getClassLoader().getResourceAsStream("application.properties")) {
-        if (input == null) {
-            System.err.println("Unable to find application.properties. This file is required for configuration.");
+        Properties properties = new Properties();
+        String uri = null;
+        String dbName = null;
+        String collectionName = null;
+        
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream("application.properties")) {
+            if (input == null) {
+                System.err.println("Unable to find application.properties. This file is required for configuration.");
+                System.exit(1);
+            }
+            
+            properties.load(input);
+            
+            uri = properties.getProperty("mongodb.uri");
+            dbName = properties.getProperty("mongodb.database");
+            collectionName = properties.getProperty("mongodb.collection");
+            
+            if (uri == null || dbName == null || collectionName == null) {
+                System.err.println("Missing required MongoDB configuration in application.properties.");
+                System.exit(1);
+            }
+        } catch (IOException ex) {
+            System.err.println("Error loading MongoDB properties: " + ex.getMessage());
             System.exit(1);
         }
         
-        properties.load(input);
-        
-        uri = properties.getProperty("mongodb.uri");
-        dbName = properties.getProperty("mongodb.database");
-        collectionName = properties.getProperty("mongodb.collection");
-        
-        if (uri == null || dbName == null || collectionName == null) {
-            System.err.println("Missing required MongoDB configuration in application.properties.");
-            System.exit(1);
-        }
-    } catch (IOException ex) {
-        System.err.println("Error loading MongoDB properties: " + ex.getMessage());
-        System.exit(1);
+        mongoClient = MongoClients.create(uri);
+        MongoDatabase database = mongoClient.getDatabase(dbName);
+        collection = database.getCollection(collectionName);
     }
-    
-    mongoClient = MongoClients.create(uri);
-    MongoDatabase database = mongoClient.getDatabase(dbName);
-    collection = database.getCollection(collectionName);
-}
 
-
-    public void runCleaner() {
+    public CleanerResult cleanAndReturnResults() {
         long startTime = System.currentTimeMillis();
 
         int totalProcessed = 0;
@@ -79,21 +79,30 @@ public class MongoCleaner {
             totalProcessed += batch.size();
         }
 
-        long endTime = System.currentTimeMillis();
+        long executionTime = System.currentTimeMillis() - startTime;
+        
+        return new CleanerResult(
+            "MongoDB", 
+            totalProcessed, 
+            bothNullCount, 
+            onlyHeNullCount, 
+            onlyHmNullCount, 
+            recordsWithEitherNull, 
+            updatedCount, 
+            0, // MongoDB doesn't track nullHeOidCount
+            0, // MongoDB doesn't track nullHmOidCount
+            executionTime
+        );
+    }
 
-        System.out.println("\nMongoDB Cleaner Statistics:");
-        System.out.println("Total records processed: " + totalProcessed);
-        System.out.println("Records with both 'he' AND 'hm' null: " + bothNullCount);
-        System.out.println("Records with only 'he' null: " + onlyHeNullCount);
-        System.out.println("Records with only 'hm' null: " + onlyHmNullCount);
-        System.out.println("Records with either 'he' OR 'hm' null: " + recordsWithEitherNull);
-        System.out.println("Records updated: " + updatedCount);
-        System.out.println("Processing complete. Time taken: " + (endTime - startTime) + " ms\n");
+    public void runCleaner() {
+        CleanerResult result = cleanAndReturnResults();
+        result.printToConsole();
     }
 
     private void processBatch(List<Document> batch) {
         for (Document doc : batch) {
-            String id = doc.getObjectId("_id").toHexString();
+            //String id = doc.getObjectId("_id").toHexString();
 
             boolean heNull = isNullOrStringNull(doc, "he");
             boolean hmNull = isNullOrStringNull(doc , "hm");
@@ -123,7 +132,6 @@ public class MongoCleaner {
             if (modified) {
                 collection.updateOne(Filters.eq("_id", doc.getObjectId("_id")), Updates.combine(updates));
                 updatedCount++;
-                System.out.println("Updated MongoDB record: " + id);
             }
         }
     }
