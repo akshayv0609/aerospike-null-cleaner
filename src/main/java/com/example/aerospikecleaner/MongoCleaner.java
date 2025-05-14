@@ -6,31 +6,25 @@ import com.mongodb.client.model.Updates;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
 
 /**
  * MongoCleaner is responsible for cleaning null values from MongoDB database records.
- * 
  * This class connects to a MongoDB database using configuration from application.properties,
- * queries records for null values in specific fields (he and hm), and updates those records
- * by removing the null values. It processes records in batches for better performance and
- * provides statistics about the cleaning process.
- * 
- * The class implements proper resource management with try-with-resources and provides
- * detailed logging of the cleaning process.
+ * finds records with null values in specific fields (he and hm), and updates those records
+ * by removing the null values. It processes records in batches for better performance.
  */
 public class MongoCleaner {
 
-    // Constant for batch processing
     private static final int MAX_BATCH_SIZE = 500;
 
-    // MongoDB client and collection
     private final MongoClient mongoClient;
     private final MongoCollection<Document> collection;
 
-    // Statistics counters
     private int bothNullCount = 0;
     private int onlyHeNullCount = 0;
     private int onlyHmNullCount = 0;
@@ -39,8 +33,8 @@ public class MongoCleaner {
 
     /**
      * Default constructor that loads configuration from application.properties.
-     * This constructor eliminates the need for hardcoded configuration values.
-     * It initializes the MongoDB client and retrieves the specified database and collection.
+     * Initializes the MongoDB client and retrieves the specified database and collection.
+     * Exits the application if any required configuration is missing or invalid.
      */
     public MongoCleaner() {
         Properties properties = new Properties();
@@ -69,87 +63,117 @@ public class MongoCleaner {
             System.exit(1);
         }
         
-        // Initialize MongoDB client and collection
         mongoClient = MongoClients.create(uri);
         MongoDatabase database = mongoClient.getDatabase(dbName);
         collection = database.getCollection(collectionName);
     }
 
     /**
-     * Main method to clean null values from MongoDB records.
-     * This method queries the MongoDB collection for records with null values
-     * in he or hm fields and updates them by removing the null values.
+     * Cleans null values from MongoDB records and returns the results.
+     * Finds records with null values, processes them in batches,
+     * and collects statistics about the cleaning process.
+     * 
+     * @return CleanerResult containing statistics about the cleaning process
      */
-    public void clean() {
-        System.out.println("\nStarting MongoDB cleaning process...");
-        
-        // Create a filter to find documents with null he or hm fields
-        Bson filter = Filters.or(
-            Filters.eq("he", null),
-            Filters.eq("hm", null)
-        );
-        
-        // Find all matching documents
-        try (MongoCursor<Document> cursor = collection.find(filter).batchSize(MAX_BATCH_SIZE).iterator()) {
-            while (cursor.hasNext()) {
-                Document doc = cursor.next();
-                processDocument(doc);
+    public CleanerResult cleanAndReturnResults() {
+        long startTime = System.currentTimeMillis();
+
+        int totalProcessed = 0;
+        FindIterable<Document> documents = collection.find();
+        List<Document> batch = new ArrayList<>();
+
+        for (Document doc : documents) {
+            batch.add(doc);
+            if (batch.size() >= MAX_BATCH_SIZE) {
+                processBatch(batch);
+                totalProcessed += batch.size();
+                batch.clear();
             }
         }
+
+        if (!batch.isEmpty()) {
+            processBatch(batch);
+            totalProcessed += batch.size();
+        }
+
+        long executionTime = System.currentTimeMillis() - startTime;
         
-        // Print statistics after cleaning
-        System.out.println("\nMongoDB Cleaning Statistics:");
-        System.out.println("Records with both he and hm null: " + bothNullCount);
-        System.out.println("Records with only he null: " + onlyHeNullCount);
-        System.out.println("Records with only hm null: " + onlyHmNullCount);
-        System.out.println("Total records with either null: " + recordsWithEitherNull);
-        System.out.println("Total records updated: " + updatedCount);
+        return new CleanerResult(
+            "MongoDB", 
+            totalProcessed, 
+            bothNullCount, 
+            onlyHeNullCount, 
+            onlyHmNullCount, 
+            recordsWithEitherNull, 
+            updatedCount, 
+            0, // MongoDB doesn't track nullHeOidCount
+            0, // MongoDB doesn't track nullHmOidCount
+            executionTime
+        );
     }
 
     /**
-     * Processes a MongoDB document, checking for null values in he and hm fields.
-     * If null values are found, the document is updated to remove those values.
-     * 
-     * @param doc The MongoDB document to process
+     * Cleans null values from MongoDB records and prints the results to the console.
+     * This method is a wrapper around cleanAndReturnResults() that prints the results.
      */
-    private void processDocument(Document doc) {
-        Object heValue = doc.get("he");
-        Object hmValue = doc.get("hm");
-        
-        boolean heIsNull = (heValue == null);
-        boolean hmIsNull = (hmValue == null);
-        
-        if (!heIsNull && !hmIsNull) {
-            return;
+    public void runCleaner() {
+        CleanerResult result = cleanAndReturnResults();
+        result.printToConsole();
+    }
+
+    /**
+     * Processes a batch of documents, checking for null values and updating documents as needed.
+     * 
+     * @param batch List of documents to process
+     */
+    private void processBatch(List<Document> batch) {
+        for (Document doc : batch) {
+            //String id = doc.getObjectId("_id").toHexString();
+
+            boolean heNull = isNullOrStringNull(doc, "he");
+            boolean hmNull = isNullOrStringNull(doc , "hm");
+            boolean modified = false;
+            List<Bson> updates = new ArrayList<>();
+
+            if (heNull) {
+                updates.add(Updates.unset("he"));
+                modified = true;
+            }
+            if (hmNull) {
+                updates.add(Updates.unset("hm"));
+                modified = true;
+            }
+
+            if (heNull && hmNull) {
+                bothNullCount++;
+                recordsWithEitherNull++;
+            } else if (heNull) {
+                onlyHeNullCount++;
+                recordsWithEitherNull++;
+            } else if (hmNull) {
+                onlyHmNullCount++;
+                recordsWithEitherNull++;
+            }
+
+            if (modified) {
+                collection.updateOne(Filters.eq("_id", doc.getObjectId("_id")), Updates.combine(updates));
+                updatedCount++;
+            }
         }
-        
-        recordsWithEitherNull++;
-        
-        // Update statistics based on which fields are null
-        if (heIsNull && hmIsNull) {
-            bothNullCount++;
-        } else if (heIsNull) {
-            onlyHeNullCount++;
-        } else {
-            onlyHmNullCount++;
-        }
-        
-        // Create update operations to unset null fields
-        Bson updates = null;
-        if (heIsNull && hmIsNull) {
-            updates = Updates.combine(
-                Updates.unset("he"),
-                Updates.unset("hm")
-            );
-        } else if (heIsNull) {
-            updates = Updates.unset("he");
-        } else {
-            updates = Updates.unset("hm");
-        }
-        
-        // Update the document
-        collection.updateOne(Filters.eq("_id", doc.getObjectId("_id")), updates);
-        updatedCount++;
+    }
+
+    /**
+     * Checks if a field in a document is null or contains the string "null".
+     * 
+     * @param doc The document to check
+     * @param fieldName The name of the field to check
+     * @return true if the field is null or contains the string "null", false otherwise
+     */
+    private boolean isNullOrStringNull(Document doc, String fieldName) {
+        return doc.containsKey(fieldName) && (
+            doc.get(fieldName) == null ||
+            "null".equalsIgnoreCase(doc.get(fieldName).toString().trim())
+        );
     }
 
     /**
@@ -157,8 +181,6 @@ public class MongoCleaner {
      * This method should be called when the cleaner is no longer needed.
      */
     public void close() {
-        if (mongoClient != null) {
-            mongoClient.close();
-        }
+        mongoClient.close();
     }
 }
